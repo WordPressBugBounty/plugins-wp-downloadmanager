@@ -1,75 +1,85 @@
 <?php
-/*
- * Uninstall plugin
+/**
+ * Uninstall WP-DownloadManager.
+ *
+ * @package WP-DownloadManager
  */
-if ( !defined( 'WP_UNINSTALL_PLUGIN' ) )
-    exit ();
 
-$option_names = array(
-    'download_path'
-    , 'download_path_url'
-    , 'download_page_url'
-    , 'download_method'
-    , 'download_categories'
-    , 'download_sort'
-    , 'download_template_header'
-    , 'download_template_footer'
-    , 'download_template_category_header'
-    , 'download_template_category_footer'
-    , 'download_template_listing'
-    , 'download_template_embedded'
-    , 'download_template_most'
-    , 'download_template_pagingheader'
-    , 'download_template_pagingfooter'
-    , 'download_nice_permalink'
-    , 'download_template_download_page_link'
-    , 'download_template_none'
-    , 'widget_download_most_downloaded'
-    , 'widget_download_recent_downloads'
-    , 'download_options'
-    , 'widget_downloads'
-);
-
-
-if ( is_multisite() ) {
-    $ms_sites = wp_get_sites();
-
-    if( 0 < sizeof( $ms_sites ) ) {
-        foreach ( $ms_sites as $ms_site ) {
-            switch_to_blog( $ms_site['blog_id'] );
-            if( sizeof( $option_names ) > 0 ) {
-                foreach( $option_names as $option_name ) {
-                    delete_option( $option_name );
-                    plugin_uninstalled();
-                }
-            }
-        }
-    }
-
-    restore_current_blog();
-} else {
-    if( sizeof( $option_names ) > 0 ) {
-        foreach( $option_names as $option_name ) {
-            delete_option( $option_name );
-            plugin_uninstalled();
-        }
-    }
+if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
+	exit();
 }
 
-/**
- * Delete plugin table when uninstalled
- *
- * @access public
- * @return void
- */
-function plugin_uninstalled() {
-    global $wpdb;
+require_once __DIR__ . '/includes/class-wp-downloadmanager-template.php';
+require_once __DIR__ . '/includes/class-wp-downloadmanager-options.php';
+// The table drop lives in the install class so the schema change stays in
+// includes/ with the rest of the plugin's table work; this file declares
+// nothing but a class, so requiring it here runs no code.
+require_once __DIR__ . '/includes/class-wp-downloadmanager-install.php';
 
-    $table_names = array( 'downloads' );
-    if( sizeof( $table_names ) > 0 ) {
-        foreach( $table_names as $table_name ) {
-            $table = $wpdb->prefix . $table_name;
-            $wpdb->query( "DROP TABLE IF EXISTS $table" );
-        }
-    }
+// Guarded because the test suite runs this file more than once in a process;
+// WordPress itself only ever includes it the once.
+if ( ! function_exists( 'wp_downloadmanager_uninstall_site' ) ) {
+	/**
+	 * Remove every option row and the downloads table for the current site.
+	 *
+	 * @return void
+	 */
+	function wp_downloadmanager_uninstall_site() {
+		// The legacy rows are listed by the options class, so this and the
+		// migration can never disagree about which rows belong to the plugin.
+		// 2.0.0 consolidated them into wp_downloadmanager_options, but an
+		// install that never reached the migration may still have them.
+		$option_names = array_merge(
+			array_keys( WP_DownloadManager_Options::legacy_map() ),
+			array_values( WP_DownloadManager_Options::legacy_structured_rows() ),
+			WP_DownloadManager_Options::legacy_extra_rows(),
+			array(
+				WP_DownloadManager_Options::OPTION,
+				WP_DownloadManager_Options::VERSION,
+				'widget_downloads',
+			)
+		);
+
+		// Except the rows that were never this plugin's to delete. They are on the
+		// lists above because the migration folds them in and has to know where
+		// each one lands; six sibling plugins read them, and any that has not
+		// upgraded yet is reading them still. See legacy_shared_rows().
+		$option_names = array_diff( $option_names, WP_DownloadManager_Options::legacy_shared_rows() );
+
+		foreach ( $option_names as $option_name ) {
+			delete_option( $option_name );
+		}
+
+		// The capability this plugin created, taken back off the administrator
+		// role. Granted through the same accessor the screens check, so a site
+		// using wp_downloadmanager_capability does not keep a capability nothing
+		// removes.
+		WP_DownloadManager_Install::revoke_capability();
+
+		// Dropping the plugin's own table is the entire job here. The table was
+		// dropped once per option row before, which worked only by accident.
+		WP_DownloadManager_Install::drop_table();
+	}
+}
+
+if ( is_multisite() ) {
+	// 'number' => 0 lifts WP_Site_Query's default cap of 100. Without it a
+	// network larger than that silently keeps its options and tables on every
+	// site past the hundredth, and uninstall still reports success.
+	$site_ids = get_sites(
+		array(
+			'fields' => 'ids',
+			'number' => 0,
+		)
+	);
+
+	foreach ( $site_ids as $site_id ) {
+		switch_to_blog( (int) $site_id );
+		wp_downloadmanager_uninstall_site();
+		// switch_to_blog() pushes onto a stack, so the restore belongs inside
+		// the loop rather than once at the end.
+		restore_current_blog();
+	}
+} else {
+	wp_downloadmanager_uninstall_site();
 }
