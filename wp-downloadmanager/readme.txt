@@ -3,8 +3,8 @@ Contributors: GamerZ
 Donate link: https://lesterchan.net/site/donation/  
 Tags: download, downloads, file, files, manager  
 Requires at least: 6.8  
-Tested up to: 7.0  
-Stable tag: 2.0.0  
+Tested up to: 7.1  
+Stable tag: 2.0.1  
 Requires PHP: 8.2  
 License: GPLv2 or later  
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -51,7 +51,7 @@ obligations.
  1. Example: `[download id="2" sort_by="file_id" sort_order="asc"]`
  1. This will sort the embedded downloads by file ID in ascending order.
  1. Valid values for `sort_by` are: `file_id`, `file`, `file_name`, `file_size`, `file_date`, and `file_hits`
-1. To choose what to display within the embedded file, use `[download id="1" display="both"]` where 1 is your file id and both will display both the file name and file description, whereas name will only display the filename. Note that this will overwrite the "Download Embedded File" template you have in your Download Templates.
+1. To choose what to display within the embedded file, use `[download id="1" display="both"]` where 1 is your file id and both will display both the file name and file description, whereas name will only display the filename. Note that this will overwrite the "Download Embedded File" template you have on the Templates tab.
 1. To embed files as well as categories, use `[download id="1,2,3" category="4,5,6"]` where 1,2,3 are your file id and 4,5,6 are your category ids.
 1. If you are using Default Permalinks, the file direct download link will be `http://yoursite.com/index.php?dl_id=2`. If you are using Nice Permalinks, the file direct download link will be `http://yoursite.com/download/2/`, where yoursite.com is your WordPress URL and 2 is your file id.
 1. The direct download category link will be `http://yoursite.com/downloads/?dl_cat=3`, where yoursite.com is your WordPress URL, downloads is your Downloads Page name and 3 is your download category id.
@@ -171,12 +171,19 @@ wrapper and leave `%FILE_ICON%` on its own.
 6. The Download block in the editor, with the file it embeds previewed and the sidebar choosing which files, which categories and what each row shows
 
 ## Changelog
+### 2.0.1
+* NEW: A Settings link on the plugin's row on the Plugins screen
+* CHANGED: A stylesheet named `wp-downloadmanager.css` in the parent theme now overrides the plugin's copy too; a child theme's copy still wins over both
+* CHANGED: The update migration runs on any request rather than only when an admin page loads, so a site updated by an automatic background update no longer serves its front end from unmigrated settings until somebody logs in
+* FIXED: A fresh install shipped one category, General, in the numbered slot that means "no category", so the Add File dropdown offered it as category 0 and every file you added was filed there. The first time you saved the Settings tab — for any reason at all — the category list was renumbered and General became category 1, while your files stayed at 0 and stopped showing a category on the downloads page, in the feed, in the widget and on Manage Downloads. Nothing warned you, and re-picking the category on every file was the only way back. The list now ships with that slot empty, and updating moves your categories up one and moves every file with them, so a file filed under General still reads General
+* FIXED: Manage Downloads read "N/A" for a file in no category, or in one you had deleted, while the Delete File confirmation for that same file left the category blank — one click apart, on the row you had just clicked
+
 ### 2.0.0
 * FIXED: `%FILE%` and `%FILE_DOWNLOAD_URL%` were substituted into the templates unescaped, where `%FILE_NAME%` and `%FILE_DESCRIPTION%` are filtered. Those two are the fields a site owner is meant to put markup in; a file path and a URL are not. The stock templates put the URL in a double-quoted attribute, which is the only reason it never bit — a template of your own using single quotes had nothing behind it
 * FIXED: Search highlighting rewrote already-rendered markup, so a search term that happened to appear inside an attribute — `example` in a stored link to `example.com` — spliced the highlight into the middle of the attribute and ended it early. Any visitor could corrupt a listing's markup through the search box. Only the text between tags is highlighted now
 * FIXED: The Browse source stored whatever file name was posted, and the download endpoint read it. A name climbing out of the downloads directory — `/../../../wp-config.php` — was accepted by Add File and served to anyone, because the stored name is a relative path and neither `sanitize_text_field()` nor the character filter that follows it touches `.` or `/`. Add File now refuses such a name, and the endpoint resolves the path and confirms it is inside the downloads directory before reading a byte, so a row written by anything else is refused too
 * FIXED: A remote file URL was checked for its scheme and its port and nothing else, so `http://169.254.169.254/latest/meta-data/` and `http://127.0.0.1/` were both accepted — and the endpoint proxies a remote file with `readfile()`, which is not `wp_safe_remote_get()` and makes none of the checks WordPress otherwise would. The host must now resolve outside this network, it is checked again when the file is served rather than only when it is saved, and redirects are no longer followed. `wp_downloadmanager_host_is_public` is the escape hatch for a mirror that genuinely is on the local network
-* BREAKING: Requires WordPress 6.8 and PHP 8.2, up from 6.0 and 7.4.
+* BREAKING: Requires WordPress 6.8 and PHP 8.2.
 * BREAKING: The `downloads_page` filter is now `wp_downloadmanager_page` and the `download_embedded` filter is now `wp_downloadmanager_embedded`. The old names are gone.
 * BREAKING: The nineteen `download_*` option rows are consolidated into `wp_downloadmanager_options`, and the schema marker into `wp_downloadmanager_version`. Settings are migrated automatically and the old rows deleted.
 * BREAKING: Download Options and Download Templates are two tabs on one Settings page, so their admin URLs have changed.
@@ -210,6 +217,12 @@ wrapper and leave `%FILE_ICON%` on its own.
 * NOTE: The bare "to" between the file chooser and the folder select carries translator context now. That msgid changed, so an existing translation of it falls back to English until it is retranslated
 
 ## Upgrade Notice
+
+### 2.0.1
+
+**This one renumbers your categories and your downloads table, once, on the first dashboard load after updating.** Category 1 becomes category 2, and so on, with an empty slot taking the front of the list, because a file whose category is 0 means "no category" everywhere else in the plugin. Every row in the downloads table moves up by the same one, so each file keeps the category you gave it and the downloads page, the feed, the widget and Manage Downloads all read the same as before. Take your usual backup first if you like, but nothing is deleted and nothing needs re-picking.
+
+If you had already saved the Settings tab at least once, your list already has that empty slot and neither it nor your files are touched.
 
 ### 2.0.0
 

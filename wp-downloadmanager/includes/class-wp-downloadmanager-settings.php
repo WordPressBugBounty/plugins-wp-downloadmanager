@@ -67,12 +67,46 @@ class WP_DownloadManager_Settings {
 	const SECTION_TEMPLATES = 'wp_downloadmanager_templates';
 
 	/**
-	 * Hook up.
+	 * Hook registration.
 	 *
 	 * @return void
 	 */
 	public static function init() {
 		add_action( 'admin_init', array( __CLASS__, 'register' ) );
+		add_filter(
+			'plugin_action_links_' . plugin_basename( WP_DOWNLOADMANAGER_MAIN_FILE ),
+			array( __CLASS__, 'action_links' )
+		);
+	}
+
+	/**
+	 * The capability the settings screen is gated on.
+	 *
+	 * @param string $context Screen context.
+	 * @return string
+	 */
+	public static function capability( $context = 'settings' ) {
+		/** This filter is documented in includes/class-wp-downloadmanager-admin.php */
+		return (string) apply_filters( 'wp_downloadmanager_capability', 'manage_options', $context );
+	}
+
+	/**
+	 * Add a Settings link on the Plugins screen row.
+	 *
+	 * @param string[] $links Existing action links.
+	 * @return string[]
+	 */
+	public static function action_links( $links ) {
+		array_unshift(
+			$links,
+			sprintf(
+				'<a href="%s">%s</a>',
+				esc_url( WP_DownloadManager_Admin::screen_url( 'settings' ) ),
+				esc_html__( 'Settings', 'wp-downloadmanager' )
+			)
+		);
+
+		return $links;
 	}
 
 	/**
@@ -257,10 +291,34 @@ class WP_DownloadManager_Settings {
 	/**
 	 * One category per line, index 0 reserved for the "all" label.
 	 *
-	 * @param string $raw Newline separated category names.
+	 * Two shapes reach this, and only one of them is a textarea. The form posts a
+	 * single string, and that is where the numbering is built: index 0 is left
+	 * empty because a file whose file_category is 0 is in no category, and the
+	 * listing page prints that slot as the totals label instead.
+	 *
+	 * The stored list arrives as an array whenever something writes the whole row
+	 * rather than posting the form -- an upgrade re-sanitising what it just read,
+	 * WP-CLI, or core running this callback from add_option() and update_option().
+	 * Handing an array to a string sanitiser yields an empty string, so every one
+	 * of those writes used to collapse the whole list to a single blank entry and
+	 * leave every file reading "N/A". It is kept key for key instead: those keys
+	 * are what each file's file_category points at, and renumbering them moves
+	 * files into categories nobody chose.
+	 *
+	 * @param string|array $raw Newline separated category names, or the stored list.
 	 * @return array
 	 */
 	protected static function sanitize_categories( $raw ) {
+		if ( is_array( $raw ) ) {
+			$categories = array();
+
+			foreach ( $raw as $index => $category ) {
+				$categories[ $index ] = is_scalar( $category ) ? sanitize_text_field( (string) $category ) : '';
+			}
+
+			return $categories;
+		}
+
 		$categories = array( '' );
 
 		foreach ( explode( "\n", sanitize_textarea_field( $raw ) ) as $category ) {
@@ -675,14 +733,21 @@ class WP_DownloadManager_Settings {
 			printf( '<p class="description">%s</p>', esc_html( $args['desc'] ) );
 		}
 
-		echo '<p class="description">' . esc_html__( 'Allowed Variables:', 'wp-downloadmanager' ) . '<br />';
+		// Inline code spans on one line, not a hyphenated column of <br />s: a
+		// handful of short tokens, and a column pushes the field they belong to
+		// off the screen. Sentence case, and the tokens outside the translatable
+		// string -- phpcbf reads a % inside one as a printf placeholder and
+		// renumbers it, which would show %1$FILE_NAME% to the user.
+		echo '<p class="description">' . esc_html__( 'Allowed variables:', 'wp-downloadmanager' ) . ' ';
+
 		if ( empty( $args['vars'] ) ) {
-			echo '- ' . esc_html__( 'N/A', 'wp-downloadmanager' ) . '<br />';
+			echo esc_html__( 'N/A', 'wp-downloadmanager' );
 		} else {
 			foreach ( $args['vars'] as $var ) {
-				echo '- ' . esc_html( $var ) . '<br />';
+				echo '<code>' . esc_html( $var ) . '</code> ';
 			}
 		}
+
 		echo '</p>';
 
 		printf(
@@ -869,7 +934,7 @@ class WP_DownloadManager_Settings {
 	 * @return void
 	 */
 	public static function render_page() {
-		if ( ! current_user_can( WP_DownloadManager_Admin::capability( 'settings' ) ) ) {
+		if ( ! current_user_can( self::capability() ) ) {
 			wp_die( esc_html__( 'You do not have sufficient permissions to access this page.', 'wp-downloadmanager' ), '', array( 'response' => 403 ) );
 		}
 

@@ -5,9 +5,7 @@
  * @package WP-DownloadManager
  */
 
-if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
-	exit();
-}
+defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
 
 require_once __DIR__ . '/includes/class-wp-downloadmanager-template.php';
 require_once __DIR__ . '/includes/class-wp-downloadmanager-options.php';
@@ -36,6 +34,11 @@ if ( ! function_exists( 'wp_downloadmanager_uninstall_site' ) ) {
 			array(
 				WP_DownloadManager_Options::OPTION,
 				WP_DownloadManager_Options::VERSION,
+				// Both are the upgrade's own bookkeeping, and both are absent on
+				// a site that finished one -- but a site uninstalling part way
+				// through an interrupted upgrade would otherwise keep them.
+				WP_DownloadManager_Install::UPGRADE_LOCK,
+				WP_DownloadManager_Install::SHIFT_PENDING,
 				'widget_downloads',
 			)
 		);
@@ -63,9 +66,8 @@ if ( ! function_exists( 'wp_downloadmanager_uninstall_site' ) ) {
 }
 
 if ( is_multisite() ) {
-	// 'number' => 0 lifts WP_Site_Query's default cap of 100. Without it a
-	// network larger than that silently keeps its options and tables on every
-	// site past the hundredth, and uninstall still reports success.
+	// 'number' => 0 lifts WP_Site_Query's default cap of 100, which would
+	// otherwise skip every site past the hundredth while reporting success.
 	$site_ids = get_sites(
 		array(
 			'fields' => 'ids',

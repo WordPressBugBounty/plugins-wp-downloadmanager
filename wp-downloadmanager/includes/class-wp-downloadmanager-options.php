@@ -139,8 +139,17 @@ class WP_DownloadManager_Options {
 	/**
 	 * Default values for every key.
 	 *
-	 * These mirror the pre-2.0.0 add_option() calls exactly. Changing any of
-	 * them silently changes what a fresh install looks like.
+	 * These mirror the pre-2.0.0 add_option() calls, with one deliberate
+	 * exception: `categories` gains the empty element at index 0 that the rest of
+	 * the plugin has always assumed was there. 1.69.2 shipped
+	 * `array( 'General' )`, so a fresh install put its only category in the slot
+	 * a file uses to mean "no category", the Add File dropdown offered it as
+	 * value 0, and the first save of the settings screen -- which rebuilds the
+	 * numbering from the textarea, where index 0 is always blank -- moved
+	 * 'General' to 1 and left every file behind at 0 reading as uncategorised.
+	 *
+	 * Changing any of the others silently changes what a fresh install looks
+	 * like.
 	 *
 	 * @return array
 	 */
@@ -154,7 +163,7 @@ class WP_DownloadManager_Options {
 			'method'           => 1,
 			'nice_permalink'   => 1,
 			'use_filename'     => 0,
-			'categories'       => array( 'General' ),
+			'categories'       => array( '', 'General' ),
 			'sort'             => array(
 				'by'      => 'file_name',
 				'order'   => 'asc',
@@ -256,11 +265,36 @@ class WP_DownloadManager_Options {
 	/**
 	 * Replace the whole option.
 	 *
+	 * `update_option()` declines to write a value equal to the one `get_option()`
+	 * would return, and `register_setting()` is passed a `default`, which installs
+	 * a `default_option_wp_downloadmanager_options` filter answering with the
+	 * shipped defaults for a row that does not exist. Core's `add_option()`
+	 * fallback sits immediately below that comparison and is unreachable once the
+	 * two compare equal. So a migration whose result happens to equal the
+	 * defaults -- the commonest install there is -- writes nothing at all, the row
+	 * is never created, and the markers are stamped complete either way, so the
+	 * upgrade can never run again while the nineteen old rows have already been
+	 * deleted.
+	 *
+	 * It was held off by nothing but hook order: the migration runs on `init`
+	 * and `register_setting()` on `admin_init`, so the migration goes first.
+	 * Any third-party `default_option_*` filter reaches it silently.
+	 *
+	 * Passing an explicit default to `get_option()` defeats the registered one --
+	 * `filter_default_option()` returns early when a default was passed -- which
+	 * is what lets an absent row be told apart from a defaulted one and added
+	 * outright. `add_option()` runs the sanitize callback exactly as
+	 * `update_option()` does, so nothing else about the stored value changes.
+	 *
 	 * @param array $values Full option array.
 	 * @return bool
 	 */
 	public static function save( $values ) {
 		self::$cache = self::merge( self::defaults(), (array) $values );
+
+		if ( false === get_option( self::OPTION, false ) ) {
+			return add_option( self::OPTION, self::$cache );
+		}
 
 		return update_option( self::OPTION, self::$cache );
 	}
@@ -275,6 +309,28 @@ class WP_DownloadManager_Options {
 	}
 
 	/**
+	 * Keys holding a list, which a stored value replaces rather than fills in.
+	 *
+	 * `categories` is numbered and the numbers are data: element 3 of the list is
+	 * category 3, and that is what every row's `file_category` column points at.
+	 * So the stored list has to come back exactly as long as it was written.
+	 * Filling the short end in from the defaults hands a site categories it does
+	 * not have -- a stored `array( 'General' )`, which is what every install
+	 * created before the empty slot at index 0 was shipped, comes back as
+	 * 'General' twice under two different numbers, and a site that emptied its
+	 * category list is given 'General' back on every read.
+	 *
+	 * It is the one key where that is true. Every other array here is a fixed set
+	 * of named settings, and a stored one missing a key genuinely wants the
+	 * default for it -- that is how a partial save keeps its siblings.
+	 *
+	 * @return array
+	 */
+	protected static function list_keys() {
+		return array( 'categories' );
+	}
+
+	/**
 	 * Recursive defaults merge that does not renumber list arrays.
 	 *
 	 * @param array $defaults Defaults.
@@ -282,8 +338,15 @@ class WP_DownloadManager_Options {
 	 * @return array
 	 */
 	protected static function merge( $defaults, $values ) {
+		$lists = self::list_keys();
+
 		foreach ( $values as $key => $value ) {
-			if ( is_array( $value ) && isset( $defaults[ $key ] ) && is_array( $defaults[ $key ] ) ) {
+			$fill_in = is_array( $value )
+				&& isset( $defaults[ $key ] )
+				&& is_array( $defaults[ $key ] )
+				&& ! in_array( $key, $lists, true );
+
+			if ( $fill_in ) {
 				$defaults[ $key ] = self::merge( $defaults[ $key ], $value );
 			} else {
 				$defaults[ $key ] = $value;
@@ -322,21 +385,19 @@ class WP_DownloadManager_Options {
 	}
 
 	/**
-	 * Write both markers in one go.
+	 * Record that this version's upgrade has finished.
 	 *
-	 * One update_option() for both, so a half-finished upgrade can never record
-	 * itself as complete.
+	 * One update_option() for both markers, so a half-finished upgrade can
+	 * never record itself as complete.
 	 *
-	 * @param string $plugin Plugin version just run.
-	 * @param string $db     Schema version just reached.
-	 * @return bool
+	 * @return void
 	 */
-	public static function save_markers( $plugin, $db ) {
-		return update_option(
+	public static function update_markers() {
+		update_option(
 			self::VERSION,
 			array(
-				'plugin' => (string) $plugin,
-				'db'     => (string) $db,
+				'plugin' => WP_DOWNLOADMANAGER_VERSION,
+				'db'     => WP_DOWNLOADMANAGER_DB_VERSION,
 			)
 		);
 	}
@@ -350,7 +411,7 @@ class WP_DownloadManager_Options {
 	 *
 	 * @return void
 	 */
-	public static function migrate_from_legacy_rows() {
+	public static function migrate_legacy_rows() {
 		// Start from whatever is already stored, not from the defaults. The
 		// marker gate is the primary guard, but it is not sufficient on its own:
 		// an install whose marker row is missing while the settings row survives

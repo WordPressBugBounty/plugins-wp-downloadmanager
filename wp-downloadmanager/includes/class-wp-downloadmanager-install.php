@@ -13,27 +13,29 @@ defined( 'ABSPATH' ) || exit;
 class WP_DownloadManager_Install {
 
 	/**
-	 * Hook up.
-	 *
-	 * @return void
+	 * Row held for the duration of an upgrade, so two requests cannot run one.
 	 */
-	public static function init() {
-		register_activation_hook( WP_DOWNLOADMANAGER_MAIN_FILE, array( __CLASS__, 'on_activation' ) );
+	const UPGRADE_LOCK = 'wp_downloadmanager_upgrade_lock';
 
-		// Activation does not fire on plugin *update*, which is the single most
-		// common reason a migration never runs. Check on load as well.
-		add_action( 'admin_init', array( __CLASS__, 'maybe_upgrade' ) );
-	}
+	/**
+	 * How long a held lock is believed before it is treated as abandoned.
+	 */
+	const UPGRADE_LOCK_TIMEOUT = 300;
+
+	/**
+	 * Row saying the downloads table is still owed the category shift.
+	 */
+	const SHIFT_PENDING = 'wp_downloadmanager_category_shift_pending';
 
 	/**
 	 * Activation hook. Handles network activation site by site.
 	 *
-	 * @param bool $network_wide Whether the plugin is being network activated.
+	 * @param bool $network_wide Whether the plugin is being activated network-wide.
 	 * @return void
 	 */
-	public static function on_activation( $network_wide = false ) {
+	public static function activate( $network_wide = false ) {
 		if ( is_multisite() && $network_wide ) {
-			// 'number' => 0 lifts WP_Site_Query's default cap of 100.
+			// 'number' => 0 lifts WP_Site_Query's default cap of 100, which would otherwise skip every site past the hundredth while reporting success.
 			$site_ids = get_sites(
 				array(
 					'fields' => 'ids',
@@ -43,13 +45,12 @@ class WP_DownloadManager_Install {
 
 			foreach ( $site_ids as $site_id ) {
 				switch_to_blog( (int) $site_id );
-				self::activate();
-				// switch_to_blog() pushes onto a stack, so the restore belongs
-				// inside the loop.
+				self::install();
+				// Inside the loop: switch_to_blog() pushes onto a stack, so restoring once after the loop unwinds it by exactly one.
 				restore_current_blog();
 			}
 		} else {
-			self::activate();
+			self::install();
 		}
 	}
 
@@ -58,7 +59,7 @@ class WP_DownloadManager_Install {
 	 *
 	 * @return void
 	 */
-	public static function activate() {
+	public static function install() {
 		self::create_table();
 		self::upgrade();
 		self::create_files_dir();
@@ -107,6 +108,20 @@ class WP_DownloadManager_Install {
 			return;
 		}
 
+		// Since the upgrade moved to init it runs on front-end requests too, so
+		// a busy site can have two of them in the migration at once.
+		if ( ! self::lock() ) {
+			return;
+		}
+
+		// Re-read behind the lock: the request that held it may have finished
+		// the whole upgrade between the check above and the lock being free.
+		WP_DownloadManager_Options::flush();
+		if ( ! self::is_behind() ) {
+			self::unlock();
+			return;
+		}
+
 		$installed = (int) WP_DownloadManager_Options::markers()['db'];
 
 		// The pre-2.0.0 rows, including WP-Stats' two shared ones. Schema 3 is
@@ -115,7 +130,7 @@ class WP_DownloadManager_Install {
 		if ( $installed < 3 ) {
 			self::upgrade_pre_130();
 			self::upgrade_pre_150();
-			WP_DownloadManager_Options::migrate_from_legacy_rows();
+			WP_DownloadManager_Options::migrate_legacy_rows();
 		} else {
 			WP_DownloadManager_Options::flush();
 			WP_DownloadManager_Options::save(
@@ -123,13 +138,57 @@ class WP_DownloadManager_Install {
 			);
 		}
 
+		// Schema 4 is the empty slot at the head of the category list. It runs
+		// after either branch above, because both can leave a list behind with a
+		// real category at index 0 - the fold brings one across from
+		// download_categories, and an install already at schema 3 has been
+		// carrying one since it was installed.
+		if ( $installed < 4 ) {
+			self::upgrade_pre_201();
+		}
+
 		// Both markers in one write, so a half-finished upgrade never records
 		// itself as complete.
-		WP_DownloadManager_Options::save_markers(
-			WP_DOWNLOADMANAGER_VERSION,
-			WP_DOWNLOADMANAGER_DB_VERSION
-		);
+		WP_DownloadManager_Options::update_markers();
 		WP_DownloadManager_Options::flush();
+
+		self::unlock();
+	}
+
+	/**
+	 * Take the upgrade lock for this site.
+	 *
+	 * The atomic half is add_option(): the options table has a unique key on
+	 * option_name, so a second request's INSERT fails rather than overwriting,
+	 * and only one caller is told it succeeded. wp_cache_add() would not do --
+	 * with no persistent object cache it succeeds in every request, and a site
+	 * with no object cache is exactly the one at risk.
+	 *
+	 * @return bool Whether this request now holds the lock.
+	 */
+	protected static function lock() {
+		$held = get_option( self::UPGRADE_LOCK, false );
+
+		if ( false !== $held ) {
+			// A request that died mid-upgrade must not stop every later one from
+			// ever finishing it.
+			if ( ( time() - (int) $held ) < self::UPGRADE_LOCK_TIMEOUT ) {
+				return false;
+			}
+
+			delete_option( self::UPGRADE_LOCK );
+		}
+
+		return add_option( self::UPGRADE_LOCK, time(), '', false );
+	}
+
+	/**
+	 * Release the upgrade lock.
+	 *
+	 * @return void
+	 */
+	protected static function unlock() {
+		delete_option( self::UPGRADE_LOCK );
 	}
 
 	/**
@@ -244,6 +303,74 @@ class WP_DownloadManager_Install {
 				$wpdb->query( "UPDATE {$wpdb->downloads} SET file_permission = 0 WHERE file_permission = 1" );
 			}
 		}
+	}
+
+	/**
+	 * Category numbers moved up one in 2.0.1, so index 0 is "no category".
+	 *
+	 * Every other part of the plugin already reads index 0 that way: the listing
+	 * page overwrites it with the totals label, the settings textarea leaves it
+	 * blank whenever it rebuilds the numbering, and the Add File dropdown hides
+	 * any category whose name is empty. What was shipped, since 1.0, was
+	 * `array( 'General' )` -- a real category in that slot. So the dropdown
+	 * offered General as value 0, files were filed under 0, and the first save of
+	 * the settings screen renumbered the list without renumbering the rows: every
+	 * download the site had added dropped out of its category, on a screen the
+	 * owner had visited to change something else entirely.
+	 *
+	 * The two halves have to happen together, which is what makes this a
+	 * migration rather than a changed default. The list gains its empty head and
+	 * every row's file_category moves up by the same one, so a file filed under
+	 * General still reads General afterwards.
+	 *
+	 * A list whose index 0 is already empty is left alone, rows and all: that is
+	 * an install whose owner has saved the settings screen at least once, which
+	 * did the renumbering to the list years ago, and moving its rows now would be
+	 * the same bug with the sign flipped.
+	 *
+	 * The two writes cannot be made one, so a flag stands between them instead.
+	 * It is set before the list moves and cleared after the rows follow, and
+	 * either half alone is enough to say what is still owed: a request that dies
+	 * part way through is resumed by the next one rather than leaving a list
+	 * that has moved and rows that have not, which would read every file under
+	 * its neighbour's category with nothing left to notice it.
+	 *
+	 * @return void
+	 */
+	protected static function upgrade_pre_201() {
+		global $wpdb;
+
+		WP_DownloadManager_Options::flush();
+		$categories = (array) WP_DownloadManager_Options::get( 'categories', array() );
+
+		if ( isset( $categories[0] ) && '' !== trim( (string) $categories[0] ) ) {
+			add_option( self::SHIFT_PENDING, 1, '', false );
+
+			// Built by hand rather than with array_unshift(), which renumbers
+			// from scratch and would close any gap in the keys. A stored list can
+			// have gaps -- nothing renumbers it when a category is emptied -- and
+			// the column update below adds one to every row, so the keys have to
+			// move by exactly one each for the two to still agree.
+			$shifted = array( '' );
+			foreach ( $categories as $index => $category ) {
+				$shifted[ (int) $index + 1 ] = $category;
+			}
+
+			WP_DownloadManager_Options::set( 'categories', $shifted );
+			WP_DownloadManager_Options::flush();
+		}
+
+		// Set above, or left behind by a run that got no further than the list.
+		if ( ! get_option( self::SHIFT_PENDING, false ) ) {
+			return;
+		}
+
+		// Negative numbers are not category ids and never were; leaving them
+		// where they are keeps a hand-written row out of slot 0, which now means
+		// something.
+		$wpdb->query( "UPDATE {$wpdb->downloads} SET file_category = file_category + 1 WHERE file_category >= 0" );
+
+		delete_option( self::SHIFT_PENDING );
 	}
 
 	/**
