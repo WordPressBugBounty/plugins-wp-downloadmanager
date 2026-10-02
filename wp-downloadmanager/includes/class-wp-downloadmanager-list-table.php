@@ -40,6 +40,7 @@ class WP_DownloadManager_List_Table extends WP_List_Table {
 	public function get_columns() {
 		return array(
 			'cb'              => '<input type="checkbox" />',
+			'file_id'         => __( 'ID', 'wp-downloadmanager' ),
 			'file_name'       => __( 'File', 'wp-downloadmanager' ),
 			'file_size'       => __( 'Size', 'wp-downloadmanager' ),
 			'file_hits'       => __( 'Hits', 'wp-downloadmanager' ),
@@ -56,6 +57,7 @@ class WP_DownloadManager_List_Table extends WP_List_Table {
 	 */
 	public function get_sortable_columns() {
 		return array(
+			'file_id'         => array( 'file_id', false ),
 			'file_name'       => array( 'file_name', true ),
 			'file_size'       => array( 'file_size', false ),
 			'file_hits'       => array( 'file_hits', false ),
@@ -179,7 +181,7 @@ class WP_DownloadManager_List_Table extends WP_List_Table {
 	/**
 	 * The bulk checkbox for one row.
 	 *
-	 * @param object $item Row from the downloads table.
+	 * @param stdClass $item Row from the downloads table.
 	 * @return string
 	 */
 	public function column_cb( $item ) {
@@ -193,7 +195,7 @@ class WP_DownloadManager_List_Table extends WP_List_Table {
 	/**
 	 * The primary column: name, path, dates and the row actions.
 	 *
-	 * @param object $item Row from the downloads table.
+	 * @param stdClass $item Row from the downloads table.
 	 * @return string
 	 */
 	public function column_file_name( $item ) {
@@ -240,12 +242,15 @@ class WP_DownloadManager_List_Table extends WP_List_Table {
 	/**
 	 * Every other column.
 	 *
-	 * @param object $item        Row from the downloads table.
-	 * @param string $column_name Column key.
+	 * @param stdClass $item        Row from the downloads table.
+	 * @param string   $column_name Column key.
 	 * @return string
 	 */
 	public function column_default( $item, $column_name ) {
 		switch ( $column_name ) {
+			case 'file_id':
+				return esc_html( (string) (int) $item->file_id );
+
 			case 'file_size':
 				return esc_html( WP_DownloadManager_File::format_size( $item->file_size ) );
 
